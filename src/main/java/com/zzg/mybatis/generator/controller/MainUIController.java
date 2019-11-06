@@ -1,5 +1,6 @@
 package com.zzg.mybatis.generator.controller;
 
+import com.jcraft.jsch.Session;
 import com.zzg.mybatis.generator.bridge.MybatisGeneratorBridge;
 import com.zzg.mybatis.generator.model.DatabaseConfig;
 import com.zzg.mybatis.generator.model.GeneratorConfig;
@@ -11,6 +12,7 @@ import com.zzg.mybatis.generator.view.AlertUtil;
 import com.zzg.mybatis.generator.view.UIProgressCallback;
 import javafx.collections.FXCollections;
 import javafx.collections.ObservableList;
+import javafx.concurrent.Task;
 import javafx.fxml.FXML;
 import javafx.scene.control.*;
 import javafx.scene.control.Label;
@@ -79,6 +81,8 @@ public class MainUIController extends BaseFXController {
     @FXML
     private CheckBox needToStringHashcodeEquals;
     @FXML
+    private CheckBox useLombokPlugin;
+    @FXML
     private CheckBox forUpdateCheckBox;
     @FXML
     private CheckBox annotationDAOCheckBox;
@@ -117,7 +121,7 @@ public class MainUIController extends BaseFXController {
         dbImage.setFitWidth(40);
         connectionLabel.setGraphic(dbImage);
         connectionLabel.setOnMouseClicked(event -> {
-            DbConnectionController controller = (DbConnectionController) loadFXMLPage("新建数据库连接", FXMLPage.NEW_CONNECTION, false);
+            TabPaneController controller = (TabPaneController) loadFXMLPage("新建数据库连接", FXMLPage.NEW_CONNECTION, false);
             controller.setMainUIController(this);
             controller.showDialogStage();
         });
@@ -137,6 +141,10 @@ public class MainUIController extends BaseFXController {
 				offsetLimitCheckBox.setDisable(true);
 			}
 		});
+		// selectedProperty().addListener 解决应用配置的时候未触发Clicked事件
+        useLombokPlugin.selectedProperty().addListener((observable, oldValue, newValue) -> {
+            needToStringHashcodeEquals.setDisable(newValue);
+        });
 
         leftDBTree.setShowRoot(false);
         leftDBTree.setRoot(new TreeItem<>());
@@ -154,7 +162,7 @@ public class MainUIController extends BaseFXController {
 	                MenuItem item2 = new MenuItem("编辑连接");
 	                item2.setOnAction(event1 -> {
 		                DatabaseConfig selectedConfig = (DatabaseConfig) treeItem.getGraphic().getUserData();
-		                DbConnectionController controller = (DbConnectionController) loadFXMLPage("编辑数据库连接", FXMLPage.NEW_CONNECTION, false);
+                        TabPaneController controller = (TabPaneController) loadFXMLPage("编辑数据库连接", FXMLPage.NEW_CONNECTION, false);
 		                controller.setMainUIController(this);
 		                controller.setConfig(selectedConfig);
 		                controller.showDialogStage();
@@ -178,7 +186,6 @@ public class MainUIController extends BaseFXController {
                     }
                     treeItem.setExpanded(true);
                     if (level == 1) {
-                        System.out.println("index: " + leftDBTree.getSelectionModel().getSelectedIndex());
                         DatabaseConfig selectedConfig = (DatabaseConfig) treeItem.getGraphic().getUserData();
                         try {
                             List<String> tables = DbUtil.getTableNames(selectedConfig);
@@ -230,6 +237,7 @@ public class MainUIController extends BaseFXController {
 		overrideXML.setTooltip(new Tooltip("重新生成时把原XML文件覆盖，否则是追加"));
         useDAOExtendStyle.setTooltip(new Tooltip("将通用接口方法放在公共接口中，DAO接口留空"));
         forUpdateCheckBox.setTooltip(new Tooltip("在Select语句中增加for update后缀"));
+        useLombokPlugin.setTooltip(new Tooltip("实体类使用Lombok @Data简化代码"));
 	}
 
     void loadLeftDBTree() {
@@ -283,14 +291,47 @@ public class MainUIController extends BaseFXController {
         bridge.setDatabaseConfig(selectedDatabaseConfig);
         bridge.setIgnoredColumns(ignoredColumns);
         bridge.setColumnOverrides(columnOverrides);
-		UIProgressCallback alert = new UIProgressCallback(Alert.AlertType.INFORMATION);
-		bridge.setProgressCallback(alert);
-		alert.show();
-		try {
+        UIProgressCallback alert = new UIProgressCallback(Alert.AlertType.INFORMATION);
+        bridge.setProgressCallback(alert);
+        alert.show();
+        PictureProcessStateController pictureProcessStateController = null;
+        try {
+            //Engage PortForwarding
+            Session sshSession = DbUtil.getSSHSession(selectedDatabaseConfig);
+            DbUtil.engagePortForwarding(sshSession, selectedDatabaseConfig);
+
+            if (sshSession != null) {
+                pictureProcessStateController = new PictureProcessStateController();
+                pictureProcessStateController.setDialogStage(getDialogStage());
+                pictureProcessStateController.startPlay();
+            }
+
             bridge.generate();
+
+            if (pictureProcessStateController != null) {
+                Task task = new Task<Void>() {
+                    @Override
+                    protected Void call() throws Exception {
+                        Thread.sleep(3000);
+                        return null;
+                    }
+                };
+                PictureProcessStateController finalPictureProcessStateController = pictureProcessStateController;
+                task.setOnSucceeded(event -> {
+                    finalPictureProcessStateController.close();
+                });
+                task.setOnFailed(event -> {
+                    finalPictureProcessStateController.close();
+                });
+                new Thread(task).start();
+            }
         } catch (Exception e) {
-			e.printStackTrace();
+            e.printStackTrace();
             AlertUtil.showErrorAlert(e.getMessage());
+            if (pictureProcessStateController != null) {
+                pictureProcessStateController.close();
+                pictureProcessStateController.playFailState(e.getMessage(), true);
+            }
         }
     }
 
@@ -325,9 +366,11 @@ public class MainUIController extends BaseFXController {
             try {
                 GeneratorConfig generatorConfig = getGeneratorConfigFromUI();
                 generatorConfig.setName(name);
+                ConfigHelper.deleteGeneratorConfig(name);
                 ConfigHelper.saveGeneratorConfig(generatorConfig);
             } catch (Exception e) {
-                AlertUtil.showErrorAlert("删除配置失败");
+                _LOG.error("保存配置失败", e);
+                AlertUtil.showErrorAlert("保存配置失败");
             }
         }
     }
@@ -349,6 +392,7 @@ public class MainUIController extends BaseFXController {
         generatorConfig.setComment(commentCheckBox.isSelected());
         generatorConfig.setOverrideXML(overrideXML.isSelected());
         generatorConfig.setNeedToStringHashcodeEquals(needToStringHashcodeEquals.isSelected());
+        generatorConfig.setUseLombokPlugin(useLombokPlugin.isSelected());
         generatorConfig.setUseTableNameAlias(useTableNameAliasCheckbox.isSelected());
         generatorConfig.setNeedForUpdate(forUpdateCheckBox.isSelected());
         generatorConfig.setAnnotationDAO(annotationDAOCheckBox.isSelected());
@@ -368,11 +412,28 @@ public class MainUIController extends BaseFXController {
         generateKeysField.setText(generatorConfig.getGenerateKeys());
         modelTargetProject.setText(generatorConfig.getModelPackageTargetFolder());
         daoTargetPackage.setText(generatorConfig.getDaoPackage());
-        daoTargetProject.setText(generatorConfig.getDaoTargetFolder());
-        mapperTargetPackage.setText(generatorConfig.getMappingXMLPackage());
+		daoTargetProject.setText(generatorConfig.getDaoTargetFolder());
+		mapperName.setText(generatorConfig.getMapperName());
+		mapperTargetPackage.setText(generatorConfig.getMappingXMLPackage());
         mappingTargetProject.setText(generatorConfig.getMappingXMLTargetFolder());
+        tableNameField.setText(generatorConfig.getTableName());
+        domainObjectNameField.setText(generatorConfig.getDomainObjectName());
+        offsetLimitCheckBox.setSelected(generatorConfig.isOffsetLimit());
+        commentCheckBox.setSelected(generatorConfig.isComment());
+        overrideXML.setSelected(generatorConfig.isOverrideXML());
+        needToStringHashcodeEquals.setSelected(generatorConfig.isNeedToStringHashcodeEquals());
+        useLombokPlugin.setSelected(generatorConfig.isUseLombokPlugin());
+        useTableNameAliasCheckbox.setSelected(generatorConfig.getUseTableNameAlias());
+        forUpdateCheckBox.setSelected(generatorConfig.isNeedForUpdate());
+        annotationDAOCheckBox.setSelected(generatorConfig.isAnnotationDAO());
+        annotationCheckBox.setSelected(generatorConfig.isAnnotation());
+        useActualColumnNamesCheckbox.setSelected(generatorConfig.isUseActualColumnNames());
         encodingChoice.setValue(generatorConfig.getEncoding());
         useExample.setSelected(generatorConfig.isUseExample());
+        useDAOExtendStyle.setSelected(generatorConfig.isUseDAOExtendStyle());
+        useSchemaPrefix.setSelected(generatorConfig.isUseSchemaPrefix());
+        jsr310Support.setSelected(generatorConfig.isJsr310Support());
+
     }
 
     @FXML
